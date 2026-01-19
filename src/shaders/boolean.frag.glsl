@@ -10,9 +10,9 @@ out vec4 outColor;
   uniform uint uOperation;
 
   void main() {
-    vec4 maskColor = texture(uMaskTexture, vUV);
+    vec4 maskColor = texture(uMaskTexture, vec2(vUV.x, 1. - vUV.y));
     vec4 prevColor = texture(uPreviousTexture, vUV);
-    float prevValue = step(0.1, prevColor.r+prevColor.g+prevColor.b);
+    float prevValue = 1. - step(0.1, prevColor.r+prevColor.g+prevColor.b);
     float maskValue = step(0.5, maskColor.a);
     float grey = 0.0;
     if (uOperation == 0u){
@@ -21,9 +21,15 @@ out vec4 outColor;
     } else if (uOperation == 1u){
       // OR
       grey = step(0.9, maskValue + prevValue);
-    } else {// if (uOperation == 2u){
+    } else if (uOperation == 2u){
       // NOT
       grey = step(0.9, prevValue - maskValue);
+    } else if (uOperation == 3u){
+      //SILHOUETTE
+      grey = maskValue;
+    } else  {
+      //DEFAULT
+      grey = .5;
     }
     grey = 1. - grey;
     outColor.rgba = vec4(grey, grey, grey, 1.);//(grey - outColor.rgb);

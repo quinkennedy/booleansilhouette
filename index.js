@@ -4,6 +4,35 @@ import '@tensorflow/tfjs-core';
 import '@tensorflow/tfjs-backend-webgl';
 import '@mediapipe/pose';
 
+const OPERATION = {
+    "NONE": -1,
+    "AND": 0,
+    "OR": 1,
+    "NOT": 2,
+    "SILHOUETTE": 3,
+    "GREY": 4,
+    "toString": function toString(op) {
+        switch (op) {
+            case 0:
+                return "AND";
+            case 1:
+                return "OR";
+            case 2:
+                return "NOT";
+            case 3:
+                return "SILHOUETTE";
+            case 4:
+                return "GREY";
+            default:
+            case -1:
+                return "NONE";
+        }
+    },
+    "notNone": function notNone(op) {
+        return op >= 0 && op <= 4;
+    }
+};
+
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', main);
 } else {
@@ -18,16 +47,17 @@ async function main() {
     //dom references
     const video = document.getElementById('video');
     const canvas = document.getElementById('segmentation-canvas');
+    document.body.addEventListener("keydown", keydownHandler);
 
     //debug etc variables
     const width = 1280;
     const height = 720;
     var frameNumber = 0;
-    var lastLogTime = 0;
     const canvasDims = {
         width: canvas.width,
         height: canvas.height
     };
+    var operation = OPERATION.NOT;
 
     //webgl setup
     const gl = canvas.getContext('webgl2');
@@ -67,7 +97,11 @@ async function main() {
         }
 
         // Create video texture
-        const webcamTexture = gl.createTexture();
+        const webcamTexture = createTexture(gl);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+        const maskTexture = createTexture(gl);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
         // Create geometry
         const quadVAO = createFullScreenQuad(gl);
@@ -84,48 +118,59 @@ async function main() {
 
         const displayUniforms = {
             webcamTexture: gl.getUniformLocation(displayProgram, 'uWebcamTexture'),
-            //maskTexture: gl.getUniformLocation(displayProgram, 'uMaskTexture'),
-            //booleanTexture: gl.getUniformLocation(displayProgram, 'uBooleanTexture')
+            maskTexture: gl.getUniformLocation(displayProgram, 'uMaskTexture'),
+            booleanTexture: gl.getUniformLocation(displayProgram, 'uBooleanTexture')
         };
         //might throw error
-    await setupCamera(video);
-    console.log('[Init] Camera ready');
+        await setupCamera(video);
+        console.log('[Init] Camera ready');
 
         async function render() {
-            if (frameNumber < 20){
+            if (frameNumber < 2) {
                 console.log("frame", frameNumber);
             }
             frameNumber = frameNumber + 1;
             const poses = await detector.estimatePoses(video);
             var seg = undefined;
-            if (poses.length){
+            if (poses.length) {
+
                 seg = await poses[0].segmentation.mask.toCanvasImageSource();
-            if (poses.length && Date.now() - lastLogTime > 5000 && false) {
-                lastLogTime = Date.now();
-                console.log(poses.length);
-                fboPair.swap();
-                //resize();
 
-                // --- Feedback Pass: Read from 'read', write to 'write' ---
-                gl.bindFramebuffer(gl.FRAMEBUFFER, fboPair.write.framebuffer);
-                gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
-
-                gl.useProgram(booleanProgram);
-
-                // Bind the 'read' texture as input
-                gl.activeTexture(gl.TEXTURE0);
-                gl.bindTexture(gl.TEXTURE_2D, fboPair.read.texture);
-                gl.uniform1i(booleanUniforms.previousTexture, 0);
-
-                // Bind mask texture
+                //upload mask to Texture 1
                 gl.activeTexture(gl.TEXTURE1);
+                gl.bindTexture(gl.TEXTURE_2D, maskTexture);
                 gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, seg); // Load the image into the texture.
-                gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-                //gl.drawArrays(gl.TRIANGLES, 0, 6);
-            }
-        }
 
-            //gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+                if (poses.length && OPERATION.notNone(operation)) {
+                    console.log("running", OPERATION.toString(operation), "on", poses.length, "poses");
+                    fboPair.swap();
+                    //resize();
+
+                    // --- Feedback Pass: Read from 'read', write to 'write' ---
+                    gl.bindFramebuffer(gl.FRAMEBUFFER, fboPair.write.framebuffer);
+                    gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+
+                    gl.useProgram(booleanProgram);
+
+                    gl.uniform1ui(booleanUniforms.operation, operation);
+
+                    // Bind the 'read' texture as input
+                    gl.activeTexture(gl.TEXTURE3);
+                    gl.bindTexture(gl.TEXTURE_2D, fboPair.read.texture);
+                    gl.uniform1i(booleanUniforms.previousTexture, 3);
+
+                    // Bind mask texture
+                    gl.uniform1i(booleanUniforms.maskTexture, 1);
+
+                    // draw quad
+                    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+                    //gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+                    operation = OPERATION.NONE;
+                }
+            }
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
             gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
             gl.useProgram(displayProgram);
             gl.bindVertexArray(quadVAO);
@@ -133,14 +178,10 @@ async function main() {
             gl.bindTexture(gl.TEXTURE_2D, webcamTexture);
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
             gl.uniform1i(displayUniforms.webcamTexture, 0);
-            /*
-            if (poses.length) {
-                gl.activeTexture(gl.TEXTURE1);
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, seg); // Load the image into the texture.
-            }
+            gl.uniform1i(displayUniforms.maskTexture, 1);
             gl.activeTexture(gl.TEXTURE2);
             gl.bindTexture(gl.TEXTURE_2D, fboPair.write.texture);
-            */
+            gl.uniform1i(displayUniforms.booleanTexture, 2);
 
             gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
 
@@ -152,6 +193,53 @@ async function main() {
     } catch (error) {
         console.error('Initialization error:', error);
         document.body.innerHTML = `<div class="error">Failed to initialize: ${error.message}</div>`;
+    }
+
+    function keydownHandler(event) {
+        console.log("handling key", event.key);
+        try {
+            switch (event.key) {
+                case "s":
+                case "S":
+                    //DEBUG SILHOUETTE
+                    operation = OPERATION.SILHOUETTE;
+                    break;
+                case "g":
+                case "G":
+                    //DEBUG GREY
+                    operation = OPERATION.GREY;
+                    break;
+                case "a":
+                case "A":
+                case "*":
+                case "&":
+                case "^":
+                    //AND
+                    operation = OPERATION.AND;
+                    break;
+                case "o":
+                case "O":
+                case "+":
+                case "|":
+                    //OR
+                    operation = OPERATION.OR;
+                    break;
+                case "x":
+                case "X":
+                    //XOR
+                    break;
+                case "n":
+                case "N":
+                case "-":
+                case "!":
+                    //NOT
+                    operation = OPERATION.NOT;
+                    break;
+            }
+        } catch (err) {
+            console.error(err);
+        }
+        console.log("triggering operation", OPERATION.toString(operation));
     }
 }
 
@@ -191,6 +279,7 @@ async function loop() {
     }
     requestAnimationFrame(loop);
 }
+
 
 // Setup camera
 async function setupCamera(videoElement) {
@@ -314,11 +403,10 @@ function createFullScreenQuad(gl) {
     gl.bindVertexArray(vao);
 
     // Define only the 4 unique vertices of our quad
-    const positions = new Float32Array([
-        -1, -1, // 0: Bottom left
-         1, -1, // 1: Bottom right
-        -1,  1, // 2: Top left
-         1,  1, // 3: Top right
+    const positions = new Float32Array([-1, -1, // 0: Bottom left
+        1, -1, // 1: Bottom right
+        -1, 1, // 2: Top left
+        1, 1, // 3: Top right
     ]);
 
     // Define indices - which vertices form each triangle
@@ -347,6 +435,21 @@ function createFullScreenQuad(gl) {
 }
 
 /**
+ * Creates a texture. it remains bound when returned
+ * @param {WebGL2RenderingContext} gl
+ * @returns {WebGLTexture}
+ */
+function createTexture(gl) {
+    var texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return texture;
+}
+
+/**
  * Creates a texture and framebuffer for off-screen rendering
  * @param {WebGL2RenderingContext} gl
  * @param {number} width
@@ -355,12 +458,7 @@ function createFullScreenQuad(gl) {
  */
 function createFramebuffer(gl, width, height) {
     // Create texture
-    const texture = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const texture = createTexture(gl);
 
     // Allocate texture storage
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
